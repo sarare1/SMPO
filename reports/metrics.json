@@ -1,0 +1,271 @@
+{
+  "ai4i": {
+    "machine_failure": {
+      "brier": 0.00745,
+      "pr_auc": 0.8909,
+      "roc_auc": 0.9784,
+      "threshold": 0.47,
+      "precision": 0.9492,
+      "recall": 0.8235,
+      "f1": 0.8819,
+      "confusion_matrix": [
+        [
+          1929,
+          3
+        ],
+        [
+          12,
+          56
+        ]
+      ],
+      "positives_in_test": 68
+    },
+    "TWF": {
+      "brier": 0.00502,
+      "pr_auc": 0.0614,
+      "roc_auc": 0.8857,
+      "threshold": 0.5,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "confusion_matrix": [
+        [
+          1990,
+          0
+        ],
+        [
+          10,
+          0
+        ]
+      ],
+      "positives_in_test": 10
+    },
+    "HDF": {
+      "brier": 0.0,
+      "pr_auc": 1.0,
+      "roc_auc": 1.0,
+      "threshold": 0.5,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "confusion_matrix": [
+        [
+          1971,
+          0
+        ],
+        [
+          0,
+          29
+        ]
+      ],
+      "positives_in_test": 29
+    },
+    "PWF": {
+      "brier": 0.00111,
+      "pr_auc": 0.9822,
+      "roc_auc": 0.9999,
+      "threshold": 0.5,
+      "precision": 0.9167,
+      "recall": 0.8462,
+      "f1": 0.88,
+      "confusion_matrix": [
+        [
+          1986,
+          1
+        ],
+        [
+          2,
+          11
+        ]
+      ],
+      "positives_in_test": 13
+    },
+    "OSF": {
+      "brier": 0.001,
+      "pr_auc": 0.9705,
+      "roc_auc": 0.9998,
+      "threshold": 0.5,
+      "precision": 0.8889,
+      "recall": 1.0,
+      "f1": 0.9412,
+      "confusion_matrix": [
+        [
+          1982,
+          2
+        ],
+        [
+          0,
+          16
+        ]
+      ],
+      "positives_in_test": 16
+    }
+  },
+  "azure_pdm": {
+    "fail_comp1_24h": {
+      "brier": 0.00014,
+      "pr_auc": 0.9957,
+      "roc_auc": 1.0,
+      "threshold": 0.5,
+      "precision": 0.9736,
+      "recall": 0.9926,
+      "f1": 0.983,
+      "confusion_matrix": [
+        [
+          96681,
+          11
+        ],
+        [
+          3,
+          405
+        ]
+      ],
+      "positives_in_test": 408
+    },
+    "fail_comp2_24h": {
+      "brier": 0.0,
+      "pr_auc": 1.0,
+      "roc_auc": 1.0,
+      "threshold": 0.5,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "confusion_matrix": [
+        [
+          96378,
+          0
+        ],
+        [
+          0,
+          722
+        ]
+      ],
+      "positives_in_test": 722
+    },
+    "fail_comp3_24h": {
+      "brier": 0.0,
+      "pr_auc": 1.0,
+      "roc_auc": 1.0,
+      "threshold": 0.5,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "confusion_matrix": [
+        [
+          96780,
+          0
+        ],
+        [
+          0,
+          320
+        ]
+      ],
+      "positives_in_test": 320
+    },
+    "fail_comp4_24h": {
+      "brier": 6e-05,
+      "pr_auc": 0.9999,
+      "roc_auc": 1.0,
+      "threshold": 0.5,
+      "precision": 0.9912,
+      "recall": 0.9956,
+      "f1": 0.9933,
+      "confusion_matrix": [
+        [
+          96646,
+          4
+        ],
+        [
+          2,
+          448
+        ]
+      ],
+      "positives_in_test": 450
+    },
+    "fail_comp1_7d": {
+      "brier": 0.02338,
+      "pr_auc": 0.3454,
+      "roc_auc": 0.9225,
+      "threshold": 0.5,
+      "precision": 0.4499,
+      "recall": 0.224,
+      "f1": 0.299,
+      "confusion_matrix": [
+        [
+          89109,
+          686
+        ],
+        [
+          1944,
+          561
+        ]
+      ],
+      "positives_in_test": 2505
+    },
+    "fail_comp2_7d": {
+      "brier": 0.04034,
+      "pr_auc": 0.4017,
+      "roc_auc": 0.9055,
+      "threshold": 0.5,
+      "precision": 0.6393,
+      "recall": 0.2122,
+      "f1": 0.3187,
+      "confusion_matrix": [
+        [
+          86961,
+          571
+        ],
+        [
+          3756,
+          1012
+        ]
+      ],
+      "positives_in_test": 4768
+    },
+    "fail_comp3_7d": {
+      "brier": 0.01844,
+      "pr_auc": 0.5167,
+      "roc_auc": 0.9802,
+      "threshold": 0.5,
+      "precision": 0.5413,
+      "recall": 0.3761,
+      "f1": 0.4438,
+      "confusion_matrix": [
+        [
+          89474,
+          683
+        ],
+        [
+          1337,
+          806
+        ]
+      ],
+      "positives_in_test": 2143
+    },
+    "fail_comp4_7d": {
+      "brier": 0.02245,
+      "pr_auc": 0.5142,
+      "roc_auc": 0.9706,
+      "threshold": 0.5,
+      "precision": 0.5513,
+      "recall": 0.341,
+      "f1": 0.4213,
+      "confusion_matrix": [
+        [
+          88673,
+          788
+        ],
+        [
+          1871,
+          968
+        ]
+      ],
+      "positives_in_test": 2839
+    },
+    "anomaly": {
+      "p99_threshold": 0.5698,
+      "flag_rate_test": 0.0099,
+      "flag_rate_24h_before_failure": 0.1138
+    }
+  }
+}
