@@ -2,9 +2,10 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.mypy_cache/
 .ipynb_checkpoints/
-data/raw/
-data/processed/
-data/decisions.jsonl
-models/
+/data/raw/
+/data/processed/
+/data/decisions.jsonl
+/models/
 ~$*
