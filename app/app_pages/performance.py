@@ -1,14 +1,28 @@
-import pandas as pd
-import streamlit as st
+"""Model performance page.
 
-import common
+WHAT THIS PAGE SHOWS (plain English)
+------------------------------------
+How accurate each prediction model was on data it never saw during training,
+read from reports/metrics.json. Quick guide to the columns:
+  * Precision - of the alarms raised, how many were real failures.
+  * Recall    - of the real failures, how many were caught.
+  * PR-AUC / ROC-AUC / F1 - overall quality scores; 1.0 is perfect.
+  * Brier     - how trustworthy the probabilities are; lower is better.
+"""
+# --- Imports: tools this page needs -----------------------------------------
+import pandas as pd     # tables of data
+import streamlit as st  # the dashboard framework
 
+import common  # shared dashboard helpers
+
+# Load the saved scores; if training has not been run yet, explain and stop.
 metrics = common.model_metrics()
 if not metrics:
     st.warning("No metrics found - run `python -m src.models.train` first.")
     st.stop()
 
 
+# Build a results table from one dataset's scores: one row per model, with a readable name.
 def frame(block: dict, names: dict) -> pd.DataFrame:
     rows = []
     for key, label in names.items():
@@ -19,9 +33,11 @@ def frame(block: dict, names: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# Number formats for the score columns.
 cfg = {c: st.column_config.NumberColumn(format="%.3f") for c in ["PR-AUC", "ROC-AUC", "Precision", "Recall", "F1"]}
 cfg["Brier"] = st.column_config.NumberColumn(format="%.4f", help="Calibration error; lower is better.")
 
+# --- Machining-line models -------------------------------------------------------
 with st.container(border=True):
     st.subheader("Machining line (AI4I 2020) · stratified 20% hold-out", anchor=False)
     st.dataframe(frame(metrics["ai4i"], {
@@ -30,6 +46,7 @@ with st.container(border=True):
     st.caption("Tool-wear failures happen at a random wear between 200-240 min, so they are not predictable "
                "from a single cycle; the system covers them with a physics rule (flag from 190 min).")
 
+# --- Fleet models ---------------------------------------------------------------
 with st.container(border=True):
     st.subheader("Fleet (Azure PdM) · time split, test from 2015-09-01", anchor=False)
     comps = ["comp1", "comp2", "comp3", "comp4"]

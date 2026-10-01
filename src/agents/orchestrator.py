@@ -1,45 +1,67 @@
 """Multi-agent orchestration (manual tool-use loop).
 
+WHAT THIS FILE DOES (plain English)
+-----------------------------------
+This is the "manager" of the AI agents. When the supervisor clicks "Run agent
+analysis" (or asks the chat assistant a question), this file:
+
+  1. Decides which AI engine to use (Claude online, or Ollama on this computer).
+  2. Gathers the evidence: runs the prediction models, optimiser and scheduler
+     through the tools in tools.py.
+  3. Lets the AI agents read that evidence and write their reports / the plan.
+  4. Returns one structured action plan for the dashboard.
+
+If no AI engine is available, or a call fails, it falls back to a fixed set of
+rules (rule_based_plan) so the supervisor always gets a plan.
+
 Four specialist agents, each with a restricted tool set, report to a
 coordinator that merges them into a structured action plan. The LLM backend
 is Claude (API) or a local Ollama model, chosen by LLM_PROVIDER in .env.
 When no backend is usable, a deterministic rule-based planner produces the
 same plan shape.
 """
+# Lets Python understand modern type hints on all versions.
 from __future__ import annotations
 
-import json
-import time
-from concurrent.futures import ThreadPoolExecutor
+# --- Imports: tools this file needs -----------------------------------------
+import json                                     # reads and writes JSON (structured text)
+import time                                     # measures how long a run takes
+from concurrent.futures import ThreadPoolExecutor  # runs several agents at the same time
 
-import anthropic
+import anthropic  # official client for the Claude API
 
-from src import config
-from src.agents import prompts
-from src.agents.base import AgentError, AgentResult
-from src.agents.tools import ToolBox
-from src.models.predictor import get_fleet_model, get_process_model
-from src.optimization import scheduler
+from src import config                                               # AI engine choice and limits
+from src.agents import prompts                                       # agent instructions and plan formats
+from src.agents.base import AgentError, AgentResult                  # shared error and result types
+from src.agents.tools import ToolBox                                 # the tools agents may use
+from src.models.predictor import get_fleet_model, get_process_model  # the prediction models
+from src.optimization import scheduler                               # for the unplanned-failure cost figure
 
+# Claude feature switch: if Claude declines a request for safety reasons, retry on a fallback model.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
 def _api_message(e: anthropic.APIStatusError) -> str:
+    """Pull the human-readable message out of a Claude API error."""
     body = e.body if isinstance(e.body, dict) else {}
     return body.get("error", {}).get("message") or e.message
 
 
 class ClaudeAgentRunner:
+    """Runs AI agents on Claude (Anthropic's online API)."""
+
     def __init__(self, toolbox: ToolBox) -> None:
         self.toolbox = toolbox
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
 
     def _create(self, **kwargs):
+        """Send one request to Claude and turn technical failures into clear messages."""
         output_config = {"effort": config.CLAUDE_EFFORT, **kwargs.pop("output_config", {})}
         try:
             return self.client.beta.messages.create(
                 model=config.CLAUDE_MODEL,
                 max_tokens=config.CLAUDE_MAX_TOKENS,
+                # Let Claude decide how much to think, and return a readable summary of its reasoning.
                 thinking={"type": "adaptive", "display": "summarized"},
                 output_config=output_config,
                 # On a safety-classifier decline, the API retries on a fallback model
@@ -47,6 +69,7 @@ class ClaudeAgentRunner:
                 fallbacks="default",
                 **kwargs,
             )
+        # Each kind of failure gets its own clear explanation for the dashboard.
         except anthropic.AuthenticationError as e:
             raise AgentError("Claude API rejected the credentials - check ANTHROPIC_API_KEY in .env.") from e
         except anthropic.RateLimitError as e:
@@ -63,10 +86,12 @@ class ClaudeAgentRunner:
         start = time.time()
         tools = self.toolbox.definitions(tool_names)
         result = AgentResult(agent=agent, text="", messages=messages)
+        # Repeat: ask Claude -> run any tools it asks for -> give it the results.
         for round_no in range(config.AGENT_MAX_TOOL_ROUNDS + 1):
             extra = {}
             if tools:
                 extra["tools"] = tools
+                # In the last round, tools are switched off so Claude must answer.
                 if round_no == config.AGENT_MAX_TOOL_ROUNDS:
                     extra["tool_choice"] = {"type": "none"}
             resp = self._create(system=system, messages=messages, **extra)
@@ -75,6 +100,7 @@ class ClaudeAgentRunner:
             result.usage["input_tokens"] += resp.usage.input_tokens
             result.usage["output_tokens"] += resp.usage.output_tokens
 
+            # Record Claude's reasoning summary (and any model fallback) for the "reasoning trace".
             for block in resp.content:
                 if block.type == "thinking" and block.thinking:
                     result.trace.append({"agent": agent, "type": "thinking", "text": block.thinking})
@@ -82,17 +108,20 @@ class ClaudeAgentRunner:
                     result.trace.append({"agent": agent, "type": "fallback",
                                          "text": f"{block.from_.model} declined; {block.to.model} continued"})
 
+            # Why did Claude stop? Declined / paused / finished / wants a tool.
             if resp.stop_reason == "refusal":
                 result.text = "The model declined this request, so this agent has no report."
                 break
             if resp.stop_reason == "pause_turn":
                 continue
             if resp.stop_reason != "tool_use":
+                # Finished: collect the written answer.
                 result.text = "\n".join(b.text for b in resp.content if b.type == "text").strip()
                 if resp.stop_reason == "max_tokens":
                     result.text += "\n\n_(Output truncated at the token limit.)_"
                 break
 
+            # Claude asked for tools: run each one and send all results back together.
             tool_results = []
             for block in resp.content:
                 if block.type != "tool_use":
@@ -111,6 +140,7 @@ class ClaudeAgentRunner:
         return result
 
     def structured(self, system: str, user: str, schema: dict) -> tuple[dict, dict]:
+        """Ask Claude for an answer in the exact format `schema`; return (answer, token usage)."""
         resp = self._create(
             system=system,
             messages=[{"role": "user", "content": user}],
@@ -124,6 +154,7 @@ class ClaudeAgentRunner:
 
 
 def make_runner(toolbox: ToolBox):
+    """Pick the AI engine set in .env: Claude or the local Ollama model."""
     if config.LLM_PROVIDER == "claude":
         return ClaudeAgentRunner(toolbox)
     from src.agents.ollama_runner import OllamaAgentRunner
@@ -131,6 +162,7 @@ def make_runner(toolbox: ToolBox):
 
 
 def unavailable_reason() -> str:
+    """A plain explanation of why the AI engine cannot be used right now, and how to fix it."""
     if config.LLM_PROVIDER == "claude":
         return "Add `ANTHROPIC_API_KEY` to the `.env` file in the project root and restart the app."
     status = config.ollama_status()
@@ -140,6 +172,7 @@ def unavailable_reason() -> str:
 
 
 def _warm_models() -> None:
+    """Load the prediction models before the agents start."""
     # Load models once before worker threads start (lru_cache is not thread-safe on first call)
     get_fleet_model()
     get_process_model()
@@ -147,6 +180,7 @@ def _warm_models() -> None:
 
 def gather_evidence(toolbox: ToolBox, key: str) -> list[tuple[str, dict, str]]:
     """Run a specialist's tools in code (evidence mode). Returns (tool, args, json_output)."""
+    # Decide which tools each specialist needs; the two riskiest machines get a deep dive.
     calls: list[tuple[str, dict]] = []
     fleet = toolbox.get_fleet_overview(top_n=8)
     top = [m["machine_id"] for m in fleet["riskiest_machines"][:2]]
@@ -166,6 +200,7 @@ def gather_evidence(toolbox: ToolBox, key: str) -> list[tuple[str, dict, str]]:
                  # Verify the top candidate, so the report can cite a real simulation
                  ("simulate_process_change", {"rpm": best["rpm"], "torque_nm": best["torque_nm"],
                                               "replace_tool": best["replace_tool"]})]
+    # Run the tools and collect their results.
     evidence = []
     for name, args in calls:
         output = toolbox.run(name, args)
@@ -183,10 +218,12 @@ def run_agent_team(toolbox: ToolBox) -> dict:
     Falls back to the rule-based planner when the LLM backend is unavailable or
     a call fails, and reports why in `llm_error`.
     """
+    # No AI engine available -> rule-based plan, with the reason attached.
     if not config.llm_available():
         plan = rule_based_plan(toolbox)
         plan["llm_error"] = unavailable_reason()
         return plan
+    # Try the AI agents; if anything goes wrong, still return a rule-based plan.
     try:
         return _run_llm_team(toolbox)
     except AgentError as e:
@@ -206,6 +243,7 @@ def _run_compact(toolbox: ToolBox, runner) -> dict:
         "maintenance": {"get_plant_kpis"},      # not needed for today's decisions
         "process": {"get_process_status"},      # already under diagnosis
     }
+    # Build one evidence section per specialist area; also keep it for the dashboard trace.
     for key, spec in prompts.SPECIALISTS.items():
         evidence = [e for e in gather_evidence(toolbox, key) if e[0] not in skip[key]]
         body = "\n".join(f"{name}({json.dumps(args)}): {out}" for name, args, out in evidence)
@@ -217,6 +255,7 @@ def _run_compact(toolbox: ToolBox, runner) -> dict:
                       for n, a, o in evidence],
             "seconds": 0.0,
         }
+    # A single AI call writes the whole plan from the evidence.
     plan, usage = runner.structured(
         prompts.COORDINATOR_COMPACT,
         f"Current time: {toolbox.state.timestamp}.\n\nEvidence:\n\n" + "\n\n".join(sections),
@@ -236,12 +275,15 @@ def _run_compact(toolbox: ToolBox, runner) -> dict:
 def _run_narrate(toolbox: ToolBox, runner) -> dict:
     """Rule engine builds the actions; the LLM writes the supervisor briefing."""
     start = time.time()
+    # The actions come from the models, optimiser and scheduler (no AI involved).
     base = rule_based_plan(toolbox)
     actions = base["plan"]["actions"]
+    # Summarise each action in one line for the AI to read.
     lines = [
         f"{a['priority']}. [{a['urgency']}] {a['target']}: {a['action']}. {a['rationale']} {a['expected_impact']}"
         for a in actions
     ]
+    # The AI writes the headline, summary and caveats.
     brief, usage = runner.structured(
         prompts.NARRATOR,
         f"Current time: {toolbox.state.timestamp}. Maintenance crew capacity: "
@@ -249,6 +291,7 @@ def _run_narrate(toolbox: ToolBox, runner) -> dict:
         f"{base['plan']['situation_summary']}\n\nAction list:\n" + "\n".join(lines),
         prompts.NARRATIVE_SCHEMA,
     )
+    # Combine: the AI's briefing on top of the code-built actions.
     plan = {
         "headline": brief["headline"],
         "situation_summary": brief["situation_summary"],
@@ -268,32 +311,40 @@ def _run_narrate(toolbox: ToolBox, runner) -> dict:
 
 
 def _run_llm_team(toolbox: ToolBox) -> dict:
+    """Run the agents in the mode set by AGENT_MODE (see config.py)."""
     _warm_models()
     runner = make_runner(toolbox)
+    # The two lighter modes have their own short routines.
     if config.AGENT_MODE == "compact":
         return _run_compact(toolbox, runner)
     if config.AGENT_MODE == "narrate":
         return _run_narrate(toolbox, runner)
+    # "tools" and "evidence" modes: four specialists, then a coordinator.
     context = (
         f"Current time: {toolbox.state.timestamp}. The machining line is running the "
         f"current production cycle. {{task}}"
     )
 
     def _run(key: str) -> AgentResult:
+        """Run one specialist agent."""
         spec = prompts.SPECIALISTS[key]
         task = context.format(task=spec["task"])
+        # "tools" mode: the agent chooses and calls its own tools.
         if config.AGENT_MODE != "evidence":
             return runner.run(spec["title"], spec["system"], [{"role": "user", "content": task}], spec["tools"])
+        # "evidence" mode: the code runs the tools first; the agent only writes the report.
         evidence = gather_evidence(toolbox, key)
         blocks = "\n\n".join(f"### {name}({json.dumps(args)})\n{out}" for name, args, out in evidence)
         msgs = [{"role": "user", "content": (
             f"{task}\n\nThe plant tools have already been run for you. Evidence:\n\n{blocks}\n\n"
             "Write your report using only this evidence, in under 200 words.")}]
         result = runner.run(spec["title"], spec["system"], msgs, [])
+        # Show the tools that were run in the agent's reasoning trace.
         result.trace[:0] = [{"agent": spec["title"], "type": "tool_call", "tool": name, "input": args,
                              "output": out} for name, args, out in evidence]
         return result
 
+    # Claude can run the four specialists at the same time; a local model runs them one by one.
     if config.LLM_PROVIDER == "claude":
         with ThreadPoolExecutor(max_workers=len(prompts.SPECIALISTS)) as pool:
             results = dict(zip(prompts.SPECIALISTS, pool.map(_run, prompts.SPECIALISTS)))
@@ -301,6 +352,7 @@ def _run_llm_team(toolbox: ToolBox) -> dict:
         # A local model serves one request at a time; parallel calls would only queue
         results = {key: _run(key) for key in prompts.SPECIALISTS}
 
+    # The coordinator reads all four reports and writes the final plan.
     reports = "\n\n".join(
         f"## {prompts.SPECIALISTS[k]['title']}\n{r.text}" for k, r in results.items()
     )
@@ -309,6 +361,7 @@ def _run_llm_team(toolbox: ToolBox) -> dict:
         f"Current time: {toolbox.state.timestamp}.\n\nSpecialist reports:\n\n{reports}",
         prompts.ACTION_PLAN_SCHEMA,
     )
+    # Total AI usage across all agents.
     total = {"input_tokens": usage["input_tokens"], "output_tokens": usage["output_tokens"]}
     for r in results.values():
         total["input_tokens"] += r.usage["input_tokens"]
@@ -329,13 +382,15 @@ class ChatSession:
 
     def __init__(self, toolbox: ToolBox) -> None:
         self.toolbox = toolbox
-        self.messages: list = []
+        self.messages: list = []  # the conversation so far
 
     def ask(self, question: str) -> AgentResult:
+        """Answer one question, remembering the earlier conversation."""
         if not config.llm_available():
             return AgentResult(agent="assistant", text=unavailable_reason())
         _warm_models()
         checkpoint = len(self.messages)
+        # Add the question, stamped with the current factory time.
         self.messages.append({
             "role": "user",
             "content": f"[Current time: {self.toolbox.state.timestamp}]\n{question}",
@@ -349,15 +404,18 @@ class ChatSession:
 
 # --------------------------------------------------------------------------
 # Offline fallback: deterministic rules over the same tools
+# (Used when no AI is available; also builds the actions in "narrate" mode.)
 # --------------------------------------------------------------------------
 def rule_based_plan(toolbox: ToolBox) -> dict:
+    """Build the action plan with fixed rules - no AI involved."""
     fleet = toolbox.get_fleet_overview(top_n=15)
     process = toolbox.get_process_status()
     schedule = toolbox.plan_maintenance()
     actions = []
 
+    # Rule 1: every job the scheduler planned becomes a maintenance action.
     for job in [j for j in schedule["jobs"] if j["day"] is not None]:
-        urgent = job["p_fail_24h"] >= 0.5
+        urgent = job["p_fail_24h"] >= 0.5  # likely to fail within 24 hours
         actions.append({
             "category": "maintenance",
             "urgency": "immediate" if urgent else ("today" if job["day"] == 0 else "this_week"),
@@ -371,6 +429,7 @@ def rule_based_plan(toolbox: ToolBox) -> dict:
             "source_agents": ["Maintenance Planning Agent"],
         })
 
+    # Rule 2: if the current production cycle is at risk, recommend the optimiser's best settings.
     if process["alert"]:
         opt = toolbox.optimize_process_setpoints(0.9, True)
         best = opt["recommended"][0]
@@ -389,6 +448,7 @@ def rule_based_plan(toolbox: ToolBox) -> dict:
             "source_agents": ["Process Optimisation Agent"],
         })
 
+    # Rule 3: machines behaving unusually but with no predicted failure get an inspection.
     for m in fleet["riskiest_machines"]:
         if m["anomaly_score"] > 1 and m["risk_7d"] < 0.3:
             actions.append({
@@ -401,6 +461,7 @@ def rule_based_plan(toolbox: ToolBox) -> dict:
                 "source_agents": ["Monitoring Agent"],
             })
 
+    # Most urgent first, then number the actions 1, 2, 3...
     order = {"immediate": 0, "today": 1, "this_week": 2, "monitor": 3}
     actions.sort(key=lambda a: order[a["urgency"]])
     for i, a in enumerate(actions, 1):

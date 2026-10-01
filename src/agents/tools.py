@@ -1,25 +1,47 @@
 """Tools the LLM agents can call. Every tool is backed by the trained models,
-the optimiser, or the scheduler - the LLM never predicts failures itself."""
+the optimiser, or the scheduler - the LLM never predicts failures itself.
+
+WHAT THIS FILE DOES (plain English)
+-----------------------------------
+The AI agents cannot read the factory data directly. Instead they get a fixed
+set of seven "tools" - like buttons they can press - and each button runs our
+own tested code and returns the facts:
+
+  get_fleet_overview          - which machines are most at risk right now
+  get_machine_details         - everything about one machine
+  get_process_status          - health check of the current production cycle
+  simulate_process_change     - what-if: risk after changing speed/torque/tool
+  optimize_process_setpoints  - find the safest small setting change
+  plan_maintenance            - build the cheapest maintenance plan for the week
+  get_plant_kpis              - OEE and the yearly business case
+
+TOOL_DEFINITIONS describes each tool to the AI (name, purpose, inputs).
+ToolBox actually runs a tool when the AI asks for it.
+"""
+# Lets Python understand modern type hints on all versions.
 from __future__ import annotations
 
-import json
-from typing import Any, Callable
+# --- Imports: tools this file needs -----------------------------------------
+import json                      # turns results into text the AI can read
+from typing import Any, Callable  # type hints for "any value" and "a function"
 
-from src import config
-from src.models.predictor import get_fleet_model, get_process_model
-from src.optimization import kpis, process_optimizer, scheduler
-from src.simulation.stream import FactoryState
+from src import config                                               # default horizon and crew size
+from src.models.predictor import get_fleet_model, get_process_model  # the prediction models
+from src.optimization import kpis, process_optimizer, scheduler      # KPI, optimiser and scheduler code
+from src.simulation.stream import FactoryState                       # the current replay time and cycle
 
 
 def _schema(properties: dict, required: list[str] | None = None) -> dict:
+    """Describe a tool's inputs in the standard JSON-schema format the AI models understand."""
     return {
         "type": "object",
         "properties": properties,
         "required": required if required is not None else list(properties),
-        "additionalProperties": False,
+        "additionalProperties": False,  # the AI may not invent extra inputs
     }
 
 
+# The "menu" of tools shown to the AI: what each one does and which inputs it takes.
 TOOL_DEFINITIONS: dict[str, dict] = {
     "get_fleet_overview": {
         "description": (
@@ -103,7 +125,8 @@ class ToolBox:
     """Executes tool calls against the current factory state."""
 
     def __init__(self, state: FactoryState) -> None:
-        self.state = state
+        self.state = state  # the current replay time and production cycle
+        # Link each tool name to the code that runs it.
         self.handlers: dict[str, Callable[..., Any]] = {
             "get_fleet_overview": self.get_fleet_overview,
             "get_machine_details": self.get_machine_details,
@@ -115,10 +138,12 @@ class ToolBox:
         }
 
     def definitions(self, names: list[str] | None = None) -> list[dict]:
+        """Tool descriptions to send to the AI: all tools, or only the named ones."""
         names = list(TOOL_DEFINITIONS) if names is None else names
         return [{"name": n, "strict": True, **TOOL_DEFINITIONS[n]} for n in names]
 
     def run(self, name: str, args: dict) -> str:
+        """Run the tool the AI asked for and return its result as compact text (JSON)."""
         if name not in self.handlers:
             raise ValueError(f"Unknown tool: {name}")
         # Drop arguments the tool does not take (small local models sometimes invent some)
@@ -129,7 +154,8 @@ class ToolBox:
 
     # --- tool implementations -------------------------------------------
     def get_fleet_overview(self, top_n: int = 10) -> dict:
-        top_n = max(1, min(int(top_n), 30))
+        """The `top_n` riskiest machines right now, plus fleet-wide counts."""
+        top_n = max(1, min(int(top_n), 30))  # keep the request between 1 and 30 machines
         snap = get_fleet_model().snapshot(self.state.timestamp)
         cols = [c for c in snap.columns if c.startswith("p_")]
         machines = []
@@ -142,6 +168,7 @@ class ToolBox:
                 "risk_7d": round(float(r["risk_7d"]), 3),
                 "top_component": r["top_component"],
                 "anomaly_score": round(float(r["anomaly_score"]), 2),
+                # Only list component risks of at least 1%, to keep the answer short.
                 "component_probabilities": {c[2:]: round(float(r[c]), 3) for c in cols if r[c] >= 0.01},
             })
         return {
@@ -154,17 +181,21 @@ class ToolBox:
         }
 
     def get_machine_details(self, machine_id: int) -> dict:
+        """Full details of one machine at the current time."""
         return get_fleet_model().machine_detail(int(machine_id), self.state.timestamp)
 
     def get_process_status(self) -> dict:
+        """Health check of the current production cycle."""
         return get_process_model().diagnose(self.state.process_cycle)
 
     def simulate_process_change(self, rpm=None, torque_nm=None, replace_tool: bool = False) -> dict:
+        """What-if: failure risk of the current cycle after the given changes."""
         return process_optimizer.simulate(
             get_process_model(), self.state.process_cycle, rpm=rpm, torque_nm=torque_nm, replace_tool=replace_tool
         )
 
     def optimize_process_setpoints(self, min_throughput_ratio: float = 0.9, allow_tool_change: bool = True) -> dict:
+        """The best setting changes for the current cycle."""
         return process_optimizer.optimize(
             get_process_model(),
             self.state.process_cycle,
@@ -174,9 +205,11 @@ class ToolBox:
 
     def plan_maintenance(self, horizon_days: int = config.PLANNING_HORIZON_DAYS,
                          crew_per_day: int = config.MAINTENANCE_CREW_PER_DAY) -> dict:
+        """The cheapest maintenance plan for the next `horizon_days` days (1-14)."""
         snap = get_fleet_model().snapshot(self.state.timestamp)
         return scheduler.plan(snap, horizon_days=max(1, min(int(horizon_days), 14)),
                               crew_per_day=max(1, int(crew_per_day)))
 
     def get_plant_kpis(self) -> dict:
+        """Plant OEE and the yearly business case."""
         return kpis.plant_kpis()

@@ -1,11 +1,23 @@
-import json
+"""Assistant (chat) page.
 
-import streamlit as st
+WHAT THIS PAGE SHOWS (plain English)
+------------------------------------
+A chat window where you can ask questions in plain language, such as "Which
+machines need attention today?" or "What if we only have 2 technicians?".
+The AI assistant looks up the answer with the plant's tools (models, optimiser,
+scheduler) before replying, and you can expand "Used N tool call(s)" to see
+exactly what it checked. Suggested questions are offered before the first message.
+"""
+# --- Imports: tools this page needs -----------------------------------------
+import json  # displays tool inputs in the trace
 
-import common
-from src import config
-from src.agents.orchestrator import AgentError, ChatSession, unavailable_reason
+import streamlit as st  # the dashboard framework
 
+import common                                                               # shared dashboard helpers
+from src import config                                                      # AI engine settings
+from src.agents.orchestrator import AgentError, ChatSession, unavailable_reason  # the chat assistant
+
+# Suggested first questions: button label -> the question sent to the assistant.
 SUGGESTIONS = {
     ":material/warning: Which machines need attention today?": "Which machines need attention today, and why?",
     ":material/tune: Fix the current production cycle": (
@@ -15,6 +27,7 @@ SUGGESTIONS = {
 }
 
 
+# Show which tools the assistant used (collapsed by default) and its reasoning notes.
 def show_trace(trace: list[dict]) -> None:
     calls = [t for t in trace if t["type"] == "tool_call"]
     if not trace:
@@ -29,27 +42,32 @@ def show_trace(trace: list[dict]) -> None:
                     st.markdown(step["text"])
 
 
+# Start a conversation for this user if there is none yet.
 if st.session_state.chat is None:
     st.session_state.chat = ChatSession(common.toolbox())
 log = st.session_state.chat_log
 
+# Which AI engine is answering (or how to enable one).
 if common.llm_ready():
     st.caption(f"Answering with {config.llm_label()}.")
 else:
     st.info(unavailable_reason(), icon=":material/key:")
 
+# Replay the conversation so far.
 for msg in log:
     with st.chat_message(msg["role"]):
         if msg["role"] == "assistant":
             show_trace(msg.get("trace", []))
         st.markdown(msg["content"])
 
+# Message box (disabled while the assistant is answering) and suggestion buttons.
 prompt = st.chat_input("Ask about machines, maintenance or setpoints", submit_mode="disable")
 if not log:
     picked = st.pills("Try asking", list(SUGGESTIONS), label_visibility="collapsed")
     if picked:
         prompt = SUGGESTIONS[picked]
 
+# A new question: show it, ask the assistant, and show the answer.
 if prompt:
     log.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -65,6 +83,7 @@ if prompt:
             log.pop()  # the turn was rolled back in the session too
             st.error(str(e), icon=":material/error:")
 
+# Start over: forget the conversation.
 if log and st.button("Clear conversation", icon=":material/delete:"):
     st.session_state.chat = None
     st.session_state.chat_log = []

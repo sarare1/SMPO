@@ -1,15 +1,29 @@
-"""Agent tools and orchestration. The Claude API is mocked - no network or credits needed."""
-import json
-from types import SimpleNamespace
+"""Agent tools and orchestration. The Claude API is mocked - no network or credits needed.
 
-import jsonschema
-import pytest
+WHAT THIS FILE CHECKS (plain English)
+-------------------------------------
+That the AI-agent machinery works correctly without calling a real AI:
+  * The seven tools are described correctly and all of them run.
+  * The rule-based fallback plan has the required layout.
+  * The Claude and Ollama loops run tools, report tool errors, stop on refusals,
+    and retry a badly formatted answer - tested with fake AI replies ("mocks").
+  * When the AI fails, the user still gets a rule-based plan and the chat stays usable.
+  * The "evidence" and "narrate" modes run the tools in code and keep the
+    model-grounded actions unchanged.
+"""
+# --- Imports: tools this file needs -----------------------------------------
+import json                         # reads tool results
+from types import SimpleNamespace   # quick fake objects that imitate AI replies
 
-from src.agents import orchestrator, prompts
-from src.agents.tools import TOOL_DEFINITIONS
+import jsonschema  # checks answers against the required layout
+import pytest      # the test framework
+
+from src.agents import orchestrator, prompts    # the code being tested
+from src.agents.tools import TOOL_DEFINITIONS  # the tool menu
 
 
 def test_tool_schemas_are_strict_compatible():
+    """Every tool lists all its inputs as required and forbids extra ones."""
     for name, spec in TOOL_DEFINITIONS.items():
         schema = spec["input_schema"]
         assert schema["additionalProperties"] is False, name
@@ -18,11 +32,13 @@ def test_tool_schemas_are_strict_compatible():
 
 
 def test_specialists_only_reference_known_tools():
+    """Each specialist agent is only given tools that actually exist."""
     for spec in prompts.SPECIALISTS.values():
         assert set(spec["tools"]) <= set(TOOL_DEFINITIONS)
 
 
 def test_every_tool_runs(toolbox):
+    """All seven tools run on real data and return a non-empty result."""
     args = {
         "get_fleet_overview": {"top_n": 5},
         "get_machine_details": {"machine_id": 56},
@@ -38,22 +54,28 @@ def test_every_tool_runs(toolbox):
 
 
 def test_rule_based_plan_matches_schema(toolbox):
+    """The no-AI fallback plan has the required layout and puts urgent work first."""
     plan = orchestrator.rule_based_plan(toolbox)
     jsonschema.validate(plan["plan"], prompts.ACTION_PLAN_SCHEMA)
     assert plan["plan"]["actions"][0]["urgency"] == "immediate"
 
 
 # --- mocked Claude tool loop -------------------------------------------------
+# Fake Claude replies, so the loop can be tested without the internet or credits.
 def _resp(content, stop_reason):
+    """A fake Claude reply with the given content and stop reason."""
     return SimpleNamespace(content=content, stop_reason=stop_reason,
                            usage=SimpleNamespace(input_tokens=10, output_tokens=5))
 
 
 def _block(**kw):
+    """One fake piece of a Claude reply (text, tool request, reasoning...)."""
     return SimpleNamespace(**kw)
 
 
 class FakeMessages:
+    """Stands in for the Claude client: returns prepared replies in order and records requests."""
+
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
@@ -64,6 +86,7 @@ class FakeMessages:
 
 
 def _runner(toolbox, responses, monkeypatch):
+    """A Claude agent runner wired to the fake client."""
     fake = FakeMessages(responses)
     monkeypatch.setattr(orchestrator.anthropic, "Anthropic",
                         lambda: SimpleNamespace(beta=SimpleNamespace(messages=fake)))
@@ -71,6 +94,7 @@ def _runner(toolbox, responses, monkeypatch):
 
 
 def test_tool_loop_executes_tools_and_returns_text(toolbox, monkeypatch):
+    """Claude asks for a tool, gets the real result back, then answers; settings are sent correctly."""
     runner, fake = _runner(toolbox, [
         _resp([_block(type="thinking", thinking="Check the line first."),
                _block(type="tool_use", id="t1", name="get_process_status", input={})], "tool_use"),
@@ -92,6 +116,7 @@ def test_tool_loop_executes_tools_and_returns_text(toolbox, monkeypatch):
 
 
 def test_tool_errors_are_reported_to_model(toolbox, monkeypatch):
+    """A failing tool (unknown machine) is reported back to the AI as an error, not a crash."""
     runner, _ = _runner(toolbox, [
         _resp([_block(type="tool_use", id="t1", name="get_machine_details", input={"machine_id": 999})], "tool_use"),
         _resp([_block(type="text", text="Machine 999 does not exist.")], "end_turn"),
@@ -102,12 +127,14 @@ def test_tool_errors_are_reported_to_model(toolbox, monkeypatch):
 
 
 def test_refusal_stops_loop(toolbox, monkeypatch):
+    """If the AI declines, the agent stops and says so."""
     runner, _ = _runner(toolbox, [_resp([], "refusal")], monkeypatch)
     result = runner.run("X", "sys", [{"role": "user", "content": "go"}], None)
     assert result.stop_reason == "refusal" and "declined" in result.text
 
 
 def test_team_falls_back_to_rules_on_api_error(toolbox, monkeypatch):
+    """If the AI call fails (e.g. no credits), a rule-based plan is returned with the reason."""
     monkeypatch.setattr(orchestrator.config, "llm_available", lambda: True)
 
     def boom(_):
@@ -119,6 +146,7 @@ def test_team_falls_back_to_rules_on_api_error(toolbox, monkeypatch):
 
 
 def test_chat_rolls_back_failed_turn(toolbox, monkeypatch):
+    """A failed chat question is removed from the history, so the next question still works."""
     monkeypatch.setattr(orchestrator.config, "llm_available", lambda: True)
 
     def fail(*a, **k):
@@ -132,7 +160,10 @@ def test_chat_rolls_back_failed_turn(toolbox, monkeypatch):
 
 
 # --- mocked Ollama tool loop -----------------------------------------------
+# Fake local-model replies, so the loop can be tested without Ollama running.
 class FakeOllama:
+    """Stands in for the Ollama client: returns prepared replies in order and records requests."""
+
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
@@ -143,15 +174,18 @@ class FakeOllama:
 
 
 def _oresp(content="", tool_calls=None, done_reason="stop"):
+    """A fake Ollama reply."""
     msg = SimpleNamespace(content=content, tool_calls=tool_calls, thinking=None)
     return SimpleNamespace(message=msg, done_reason=done_reason, prompt_eval_count=100, eval_count=20)
 
 
 def _call(name, args):
+    """A fake tool request from the local model."""
     return SimpleNamespace(function=SimpleNamespace(name=name, arguments=args))
 
 
 def test_ollama_loop_runs_tools(toolbox):
+    """The local model's tool request is run (ignoring an invented input) and the answer returned."""
     from src.agents.ollama_runner import OllamaAgentRunner
     fake = FakeOllama([
         _oresp(tool_calls=[_call("get_fleet_overview", {"top_n": 3, "bogus": 1})]),
@@ -172,6 +206,7 @@ def test_ollama_loop_runs_tools(toolbox):
 
 
 def test_ollama_structured_retries_invalid_json(toolbox):
+    """A badly formatted answer is retried once and the second, valid answer is used."""
     from src.agents.ollama_runner import OllamaAgentRunner
     good = {"headline": "h", "situation_summary": "s", "actions": [], "risks_and_caveats": []}
     fake = FakeOllama([_oresp(content="{not json"), _oresp(content=json.dumps(good))])
@@ -181,6 +216,7 @@ def test_ollama_structured_retries_invalid_json(toolbox):
 
 
 def test_ollama_structured_gives_up_after_retry(toolbox):
+    """Two invalid answers in a row produce a clear error instead of a broken plan."""
     from src.agents.ollama_runner import OllamaAgentRunner
     fake = FakeOllama([_oresp(content="{}"), _oresp(content="{}")])
     with pytest.raises(orchestrator.AgentError):
@@ -188,14 +224,18 @@ def test_ollama_structured_gives_up_after_retry(toolbox):
 
 
 def test_definitions_empty_list_means_no_tools(toolbox):
+    """Asking for no tools gives no tools; asking for none specified gives all of them."""
     assert toolbox.definitions([]) == []
     assert len(toolbox.definitions()) == len(TOOL_DEFINITIONS)
 
 
 def test_evidence_mode_prefetches_tools(toolbox, monkeypatch):
+    """In "evidence" mode the code runs the tools (including the what-if check) before the AI writes."""
     calls = []
 
     class FakeRunner:
+        """Records what each agent was given and returns canned answers."""
+
         def run(self, agent, system, messages, tool_names):
             calls.append((agent, messages[0]["content"], tool_names))
             return orchestrator.AgentResult(agent=agent, text=f"{agent} report")
@@ -217,9 +257,12 @@ def test_evidence_mode_prefetches_tools(toolbox, monkeypatch):
 
 
 def test_narrate_mode_keeps_rule_actions(toolbox, monkeypatch):
+    """In "narrate" mode the AI writes only the briefing; the actions stay exactly as the models built them."""
     seen = {}
 
     class FakeRunner:
+        """Records the briefing request and returns a canned briefing."""
+
         def structured(self, system, user, schema):
             seen["user"] = user
             jsonschema.Draft202012Validator.check_schema(schema)

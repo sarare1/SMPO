@@ -1,39 +1,58 @@
 """Agent runner for a local model served by Ollama (tool-calling loop).
 
+WHAT THIS FILE DOES (plain English)
+-----------------------------------
+Talks to the free AI model running on this computer through the Ollama program.
+It does two jobs:
+
+  run()        - lets an AI agent work through a task: the AI may ask to press
+                 tools (see tools.py); this code runs them, hands back the results,
+                 and repeats until the AI writes its final answer.
+  structured() - asks the AI for an answer in a fixed format (for example the
+                 action plan), checks the format, and retries once if it is wrong.
+
 Same interface as ClaudeAgentRunner: `run()` for a tool-using agent and
 `structured()` for a JSON-schema-constrained answer.
 """
+# Lets Python understand modern type hints on all versions.
 from __future__ import annotations
 
-import json
-import time
+# --- Imports: tools this file needs -----------------------------------------
+import json  # reads the AI's answer when it is in JSON (structured text) format
+import time  # measures how long a run takes
 
-import httpx
-import jsonschema
-import ollama
+import httpx       # the web library Ollama uses; needed to recognise timeouts and connection errors
+import jsonschema  # checks that the AI's structured answer has the required format
+import ollama      # official client for the local Ollama AI program
 
-from src import config
-from src.agents.base import AgentError, AgentResult
-from src.agents.tools import ToolBox
+from src import config                              # Ollama address, model name, limits
+from src.agents.base import AgentError, AgentResult  # shared error and result types
+from src.agents.tools import ToolBox                 # the tools the AI may use
 
 
 class OllamaAgentRunner:
+    """Runs AI agents on a local Ollama model."""
+
     def __init__(self, toolbox: ToolBox, client: ollama.Client | None = None) -> None:
         self.toolbox = toolbox
+        # Connection to the Ollama program (tests pass in a fake one instead).
         self.client = client or ollama.Client(host=config.OLLAMA_HOST, timeout=config.OLLAMA_TIMEOUT_S)
 
     def _chat(self, **kwargs):
+        """Send one request to the local model and turn technical failures into clear messages."""
         model = config.OLLAMA_MODEL
         try:
             return self.client.chat(
                 model=model,
                 think=config.OLLAMA_THINK,
                 keep_alive="30m",  # keep the model loaded between agent calls
+                # Context size, maximum answer length, and low "creativity" for factual answers.
                 options={"num_ctx": config.OLLAMA_NUM_CTX, "num_predict": config.OLLAMA_MAX_OUTPUT,
                          "temperature": 0.2},
                 **kwargs,
             )
         except ollama.ResponseError as e:
+            # 404 = the model is not downloaded yet.
             if e.status_code == 404:
                 raise AgentError(f"Ollama model '{model}' is not installed - run `ollama pull {model}`.") from e
             raise AgentError(f"Ollama error: {e.error}") from e
@@ -46,6 +65,7 @@ class OllamaAgentRunner:
             raise AgentError(f"Ollama is not running at {config.OLLAMA_HOST} - start the Ollama app.") from e
 
     def _tools(self, names: list[str] | None) -> list[dict]:
+        """Convert our tool descriptions into the format Ollama expects."""
         return [
             {"type": "function",
              "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
@@ -57,24 +77,30 @@ class OllamaAgentRunner:
         start = time.time()
         tools = self._tools(tool_names)
         result = AgentResult(agent=agent, text="", messages=messages)
+        # The "system" message tells the AI its role and rules.
         system_msg = {"role": "system", "content": system}
+        # Repeat: ask the AI -> run any tools it asks for -> give it the results.
         for round_no in range(config.AGENT_MAX_TOOL_ROUNDS + 1):
+            # In the last round, no more tools: the AI must write its answer.
             last_round = round_no == config.AGENT_MAX_TOOL_ROUNDS
             resp = self._chat(messages=[system_msg, *messages], tools=None if last_round or not tools else tools)
             msg = resp.message
             messages.append(msg)
             result.stop_reason = resp.done_reason
+            # Keep count of how much text went in and came out.
             result.usage["input_tokens"] += resp.prompt_eval_count or 0
             result.usage["output_tokens"] += resp.eval_count or 0
             if msg.thinking:
                 result.trace.append({"agent": agent, "type": "thinking", "text": msg.thinking})
 
+            # No tool requested -> this is the final answer.
             if not msg.tool_calls:
                 result.text = (msg.content or "").strip()
                 if resp.done_reason == "length":
                     result.text += "\n\n_(Output truncated at the context limit.)_"
                 break
 
+            # Run each requested tool and give the result back to the AI.
             for call in msg.tool_calls:
                 name, args = call.function.name, dict(call.function.arguments or {})
                 try:
@@ -88,6 +114,7 @@ class OllamaAgentRunner:
         return result
 
     def structured(self, system: str, user: str, schema: dict) -> tuple[dict, dict]:
+        """Ask for an answer in the exact format `schema`; return (answer, token usage)."""
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         usage = {"input_tokens": 0, "output_tokens": 0}
         error = None
@@ -95,6 +122,7 @@ class OllamaAgentRunner:
             resp = self._chat(messages=messages, format=schema)
             usage["input_tokens"] += resp.prompt_eval_count or 0
             usage["output_tokens"] += resp.eval_count or 0
+            # Accept the answer only if it is valid JSON in the required format.
             try:
                 data = json.loads(resp.message.content)
                 jsonschema.validate(data, schema)

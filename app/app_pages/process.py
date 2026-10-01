@@ -1,15 +1,32 @@
-import pandas as pd
-import streamlit as st
+"""Process optimizer page.
 
-import common
-from src.optimization import process_optimizer
+WHAT THIS PAGE SHOWS (plain English)
+------------------------------------
+The machining line's current production cycle (picked in the sidebar):
+  * Its failure risk and machine settings (speed, torque, tool wear, power,
+    temperature gap).
+  * Diagnosis: which type of failure is likely, which known physical limits are
+    breached, and which measurements drive the risk.
+  * Setpoint optimizer: the three best small changes to speed / torque / tool
+    that make the cycle safe, each checked by the model. "Apply best candidate"
+    switches the line to those settings.
+  * What-if simulator: type in your own settings and see the risk before/after.
+"""
+# --- Imports: tools this page needs -----------------------------------------
+import pandas as pd     # tables of data
+import streamlit as st  # the dashboard framework
 
+import common                                    # shared dashboard helpers
+from src.optimization import process_optimizer   # what-if and optimiser code
+
+# Current production cycle and its full health check.
 s = common.state()
 pm = common.process_model()
 cycle = s.process_cycle
 diag = pm.diagnose(cycle)
 p = diag["failure_probability"]
 
+# --- Headline tiles: risk and current machine settings ---------------------------
 with st.container(horizontal=True):
     st.metric("Failure probability", f"{p:.1%}", border=True)
     st.metric("Speed", f"{cycle['rpm']:.0f} rpm", border=True)
@@ -21,6 +38,7 @@ with st.container(horizontal=True):
 st.markdown(f"Status: {common.risk_level(p)} · product type **{cycle['type']}**")
 
 left, right = st.columns(2)
+# --- Left: likely failure types and breached physical limits ---------------------
 with left, st.container(border=True):
     st.subheader("Diagnosis", anchor=False)
     modes = pd.DataFrame(
@@ -35,12 +53,15 @@ with left, st.container(border=True):
     else:
         st.success("No physics-rule limits breached.", icon=":material/check_circle:")
 
+# --- Right: which measurements drive the risk ---------------------------------
 with right, st.container(border=True):
     st.subheader("Risk drivers", anchor=False)
     st.altair_chart(common.shap_chart(diag["top_risk_drivers"]))
 
+# --- Setpoint optimizer: best safe setting changes -------------------------------
 with st.container(border=True):
     st.subheader("Setpoint optimizer", anchor=False)
+    # User limits: how much speed may drop, and whether a tool change is allowed.
     with st.container(horizontal=True, vertical_alignment="bottom"):
         min_tp = st.slider("Minimum throughput (speed vs. current)", 0.85, 1.0, 0.9, 0.05, format="%.2f")
         allow_tool = st.toggle("Allow tool change", value=True)
@@ -63,6 +84,7 @@ with st.container(border=True):
             "remaining_physics_flags": "Remaining flags",
         },
     )
+    # "Apply" switches the line to the best candidate's settings (disabled when risk is already low).
     best = result["recommended"][0]
     if st.button("Apply best candidate", icon=":material/check:", type="primary", disabled=p < 0.05):
         s.process_override = dict(cycle, rpm=best["rpm"], torque_nm=best["torque_nm"],
@@ -71,8 +93,10 @@ with st.container(border=True):
     st.caption("Every candidate is re-scored by the failure model. Applying sets custom setpoints "
                "for the line (reset from the sidebar).")
 
+# --- What-if simulator: try your own settings ------------------------------------
 with st.container(border=True):
     st.subheader("What-if simulator", anchor=False)
+    # A form, so the calculation only runs when "Simulate" is pressed.
     with st.form("whatif", border=False):
         c1, c2, c3 = st.columns(3)
         rpm = c1.number_input("Speed (rpm)", 1000.0, 3000.0, float(cycle["rpm"]), 10.0)
@@ -85,6 +109,7 @@ with st.container(border=True):
             st.metric("Risk before", f"{sim['failure_probability_before']:.1%}", border=True)
             st.metric("Risk after", f"{sim['failure_probability_after']:.1%}",
                       f"{-sim['risk_reduction'] * 100:+.1f} pts", delta_color="inverse", border=True)
+        # Warn if the settings are outside what the model has seen, or still break a known limit.
         if not sim["within_training_range"]:
             st.warning("Setpoints are outside the range seen in training - treat the prediction with caution.")
         for text in sim["remaining_physics_flags"].values():

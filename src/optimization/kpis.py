@@ -1,52 +1,70 @@
 """Plant KPIs: OEE and the business case for predictive maintenance.
 
+WHAT THIS FILE DOES (plain English)
+-----------------------------------
+Calculates the plant's headline performance numbers and estimates what
+predictive maintenance is worth in hours and dollars per year.
+
+OEE (Overall Equipment Effectiveness) is the standard factory score:
 OEE = Availability x Performance x Quality
   Availability: from the Azure PdM year of failures and planned replacements
+                (share of time machines were not stopped)
   Performance:  mean spindle rotation vs. nominal (config.NOMINAL_ROTATION)
+                (how fast machines run compared with their rated speed)
   Quality:      share of AI4I production cycles that end without a failure
 Downtime hours per event come from config (assumptions, edit for your plant).
 """
+# Lets Python understand modern type hints on all versions.
 from __future__ import annotations
 
-import json
-from functools import lru_cache
+# --- Imports: tools this file needs -----------------------------------------
+import json                      # reads the model accuracy file (metrics.json)
+from functools import lru_cache  # remembers the result so it is calculated only once
 
-import pandas as pd
+import pandas as pd  # tables of data
 
-from src import config
-from src.data.features import load_azure_raw
+from src import config                        # costs, downtime hours, file locations
+from src.data.features import load_azure_raw  # reads the Azure fleet history
 
 
 @lru_cache(maxsize=1)
 def plant_kpis() -> dict:
+    """OEE for the year, plus the projected yearly savings from predictive maintenance."""
     raw = load_azure_raw()
     tel, fails, maint = raw["telemetry"], raw["failures"], raw["maint"]
     n_machines = tel["machineID"].nunique()
-    hours = (tel["datetime"].max() - tel["datetime"].min()).total_seconds() / 3600
-    in_period = maint["datetime"] >= tel["datetime"].min()
+    hours = (tel["datetime"].max() - tel["datetime"].min()).total_seconds() / 3600  # length of the year in hours
+    in_period = maint["datetime"] >= tel["datetime"].min()  # replacements within the measured year
 
     # Replacements that coincide with a failure are unplanned
+    # (a part replaced because it broke); all others were planned.
     keys = ["datetime", "machineID"]
     fail_keys = fails.rename(columns={"failure": "comp"})[[*keys, "comp"]]
     unplanned = maint[in_period].merge(fail_keys, on=[*keys, "comp"], how="inner")
     planned_count = int(in_period.sum() - len(unplanned))
     fail_count = len(fails)
 
+    # Availability: total stopped hours vs. total machine hours.
     down_unplanned = fail_count * config.DOWNTIME_HOURS["unplanned"]
     down_planned = planned_count * config.DOWNTIME_HOURS["planned"]
     availability = 1 - (down_unplanned + down_planned) / (n_machines * hours)
+    # Performance: average speed vs. rated speed (capped at 100%).
     performance = min(1.0, tel["rotate"].mean() / config.NOMINAL_ROTATION)
+    # Quality: share of production cycles that finished without a failure.
     ai4i = pd.read_csv(config.DATA_RAW / "ai4i2020.csv", encoding="utf-8-sig")
     quality = 1 - ai4i["Machine failure"].mean()
     oee = availability * performance * quality
 
     # Projection: failures the 24h models would catch become planned jobs
+    # Uses the models' measured detection rate (recall) from the training report.
     metrics_path = config.REPORTS_DIR / "metrics.json"
     recall = 0.0
     if metrics_path.exists():
         m = json.loads(metrics_path.read_text())["azure_pdm"]
         recall = sum(m[f"fail_{c}_24h"]["recall"] for c in ("comp1", "comp2", "comp3", "comp4")) / 4
+    # Not every detected failure gets fixed in time (crew, parts), hence the realisation factor.
     prevented = fail_count * recall * config.PDM_REALIZATION
+    # Each prevented breakdown turns a long unplanned stop into a short planned one.
     downtime_saved = prevented * (config.DOWNTIME_HOURS["unplanned"] - config.DOWNTIME_HOURS["planned"])
     cost_saved = prevented * (
         config.COST["unplanned_failure"] - config.COST["planned_maintenance"]

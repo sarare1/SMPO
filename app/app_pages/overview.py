@@ -1,10 +1,24 @@
-import altair as alt
-import pandas as pd
-import streamlit as st
+"""Fleet overview page.
 
-import common
-from src.data.features import COMPONENTS
+WHAT THIS PAGE SHOWS (plain English)
+------------------------------------
+The big picture of the whole fleet at the current factory time:
+  * Headline numbers: machines at critical risk, at elevated risk, behaving
+    unusually, and the plant's OEE score with and without predictive maintenance.
+  * A heat map of the 25 riskiest machines: darker blue = higher chance that a
+    component fails within 7 days.
+  * The yearly business case for predictive maintenance.
+  * A watch-list table of the 15 riskiest machines.
+"""
+# --- Imports: tools this page needs -----------------------------------------
+import altair as alt    # charts
+import pandas as pd     # tables of data
+import streamlit as st  # the dashboard framework
 
+import common                             # shared dashboard helpers
+from src.data.features import COMPONENTS  # the four component names
+
+# Current factory time, every machine's risk at that time, and the plant KPIs.
 ts = common.state().timestamp
 snap = common.snapshot(ts)
 k = common.kpis()
@@ -12,6 +26,7 @@ proj = k["pdm_projection"]
 
 st.caption(f"Fleet of {len(snap)} machines at **{ts:%Y-%m-%d %H:%M}**")
 
+# --- Row of headline number tiles -----------------------------------------
 with st.container(horizontal=True):
     st.metric("Critical (24h risk > 50%)", int((snap["risk_24h"] > 0.5).sum()), border=True,
               help="Machines with a component likely to fail within 24 hours.")
@@ -23,11 +38,14 @@ with st.container(horizontal=True):
     st.metric("OEE with predictive maintenance", f"{proj['oee_with_pdm']:.1%}",
               f"{(proj['oee_with_pdm'] - k['oee']) * 100:+.1f} pts", border=True)
 
+# Two columns: heat map on the left (wider), business case on the right.
 left, right = st.columns([3, 2])
 
+# --- Heat map: 7-day failure risk per machine and component --------------------
 with left, st.container(border=True):
     st.subheader("7-day failure risk by component", anchor=False)
-    top = snap.head(25)
+    top = snap.head(25)  # the 25 riskiest machines
+    # Reshape into one row per (machine, component) for the chart.
     heat = (
         top[[f"p_{c}_7d" for c in COMPONENTS]]
         .rename(columns=lambda c: c.split("_")[1])
@@ -35,7 +53,7 @@ with left, st.container(border=True):
         .melt(id_vars="machineID", var_name="component", value_name="probability")
     )
     heat["machine"] = "M" + heat["machineID"].astype(str)
-    order = ["M" + str(m) for m in top.index]
+    order = ["M" + str(m) for m in top.index]  # keep riskiest machines on the left
     chart = (
         alt.Chart(heat)
         .mark_rect(stroke="white", strokeWidth=2, cornerRadius=3)
@@ -51,6 +69,7 @@ with left, st.container(border=True):
     st.altair_chart(chart)
     st.caption("Top 25 machines by 7-day risk. Hover a cell for the exact probability.")
 
+# --- Business case: what predictive maintenance is worth per year ---------------
 with right, st.container(border=True):
     st.subheader("Predictive maintenance business case", anchor=False)
     st.table(pd.DataFrame(
@@ -75,6 +94,7 @@ with right, st.container(border=True):
         "Edit cost assumptions in `src/config.py`."
     )
 
+# --- Watch-list: the 15 riskiest machines, with risk bars ---------------------------
 with st.container(border=True):
     st.subheader("Watch-list", anchor=False)
     table = snap.head(15).reset_index()[

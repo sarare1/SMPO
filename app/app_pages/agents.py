@@ -1,11 +1,27 @@
-import json
+"""Agent action plan page.
 
-import streamlit as st
+WHAT THIS PAGE SHOWS (plain English)
+------------------------------------
+The AI decision agents' prioritised action plan for the current factory time.
+  * "Run agent analysis" starts the agents (or the rule-based fallback if no AI
+    engine is available - the page says why).
+  * The plan: a headline, a short situation summary, and a list of actions, each
+    with its urgency, what to do, why, and the expected impact.
+  * Accept / Reject buttons for every action; each choice is saved to
+    data/decisions.jsonl so there is a record of what was decided.
+  * Risks and caveats, and (in the heavier modes) each specialist agent's report
+    with its reasoning trace: which tools it used and what it concluded.
+"""
+# --- Imports: tools this page needs -----------------------------------------
+import json  # displays tool inputs and outputs in the reasoning trace
 
-import common
-from src import config
-from src.agents.orchestrator import run_agent_team, unavailable_reason
+import streamlit as st  # the dashboard framework
 
+import common                                                         # shared dashboard helpers
+from src import config                                                # AI engine settings
+from src.agents.orchestrator import run_agent_team, unavailable_reason  # runs the agents
+
+# Colour and icon for each urgency level shown on the action cards.
 URGENCY_BADGE = {
     "immediate": ("red", ":material/error:"),
     "today": ("orange", ":material/schedule:"),
@@ -14,6 +30,8 @@ URGENCY_BADGE = {
 }
 
 
+# Show an agent's steps as a timeline: tools it called (inputs and results),
+# its reasoning notes, and any switch to a fallback model.
 def render_trace(trace: list[dict]) -> None:
     for step in trace:
         if step["type"] == "tool_call":
@@ -32,6 +50,7 @@ def render_trace(trace: list[dict]) -> None:
 
 
 s = common.state()
+# --- Explain what will happen (or why the AI is unavailable) ---------------------
 if common.llm_ready():
     MODE_TEXT = {
         "tools": "Four specialist agents choose and call their own tools; a coordinator merges their reports.",
@@ -39,6 +58,7 @@ if common.llm_ready():
         "compact": "The code runs all specialists' tools; the model writes the action plan in one call.",
         "narrate": "The models, optimiser and scheduler build the actions; the model writes the supervisor briefing.",
     }
+    # Rough run time: a local model on a CPU is much slower than Claude.
     local = config.LLM_PROVIDER != "claude"
     duration = {"narrate": "about 2 minutes", "compact": "10+ minutes", "evidence": "20+ minutes",
                 "tools": "20+ minutes"}.get(config.AGENT_MODE) if local else "roughly 1-3 minutes"
@@ -48,16 +68,19 @@ else:
     st.info(f"{unavailable_reason()} Until then the plan comes from the rule-based engine.",
             icon=":material/info:")
 
+# --- Run button: start the agents and keep the result for this session -------------
 if st.button("Run agent analysis", type="primary", icon=":material/play_arrow:"):
     with st.status(f":shimmer[Agents analysing the factory at {s.timestamp:%Y-%m-%d %H:%M}]") as status:
         st.write("Monitoring, diagnosis, maintenance planning and process optimisation agents working ...")
         st.session_state.agent_run = run_agent_team(common.toolbox())
         status.update(label="Analysis complete", state="complete")
 
+# Nothing to show until a plan has been generated.
 run = st.session_state.agent_run
 if run is None:
     st.stop()
 
+# Notices: the AI fell back to rules, or the clock has moved since the plan was made.
 if run.get("llm_error"):
     st.warning(f"LLM agents unavailable - showing the rule-based plan instead. {run['llm_error']}",
                icon=":material/warning:")
@@ -65,6 +88,7 @@ if run["timestamp"] != str(s.timestamp):
     st.info(f"This plan was generated for {run['timestamp']}. The clock has moved - re-run for the current time.",
             icon=":material/history:")
 
+# --- Plan summary --------------------------------------------------------------
 plan = run["plan"]
 with st.container(border=True):
     st.subheader(plan["headline"], anchor=False)
@@ -74,9 +98,10 @@ with st.container(border=True):
         meta += f" · {run['usage']['input_tokens']:,} input / {run['usage']['output_tokens']:,} output tokens"
     st.caption(meta)
 
+# --- Action cards with Accept / Reject ------------------------------------------
 st.subheader("Actions", anchor=False)
 for action in plan["actions"]:
-    key = f"{run['timestamp']}|{action['priority']}|{action['target']}"
+    key = f"{run['timestamp']}|{action['priority']}|{action['target']}"  # unique id for this action
     color, icon = URGENCY_BADGE[action["urgency"]]
     with st.container(border=True):
         with st.container(horizontal=True, vertical_alignment="center"):
@@ -86,6 +111,7 @@ for action in plan["actions"]:
         st.markdown(action["action"])
         st.caption(f"Why: {action['rationale']}  \nImpact: {action['expected_impact']}  \n"
                    f"From: {', '.join(action['source_agents'])}")
+        # Show the decision if one was made; otherwise offer the two buttons.
         decision = st.session_state.decisions.get(key)
         if decision:
             st.markdown(f":green[:material/check: Accepted]" if decision == "accepted"
@@ -101,12 +127,14 @@ for action in plan["actions"]:
                     common.log_decision(action, "rejected", run["timestamp"])
                     st.rerun()
 
+# --- Risks and caveats --------------------------------------------------------
 if plan["risks_and_caveats"]:
     with st.container(border=True):
         st.markdown("**Risks and caveats**")
         for item in plan["risks_and_caveats"]:
             st.markdown(f"- {item}")
 
+# --- Specialist reports (only in modes that produce them), one tab per agent --------
 if run["reports"]:
     st.subheader("Specialist reports", anchor=False)
     tabs = st.tabs([r["title"] for r in run["reports"].values()])
